@@ -1,0 +1,4 @@
+  <config version="1">
+      <apikey>addsyncthingapikey</apikey>
+      <url>http://localhost:8080</url>
+  </config>
