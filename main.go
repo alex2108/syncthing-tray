@@ -146,6 +146,7 @@ func query_syncthing(url string) (string, error) {
 }
 
 func get_config() error {
+    log.Println("reading config from syncthing")
     //create empty state
     node = make(map[string]*Node)
     repo = make(map[string]*Repo)
@@ -207,8 +208,10 @@ func get_config() error {
     
 
     //Display version
+    log.Println("getting version")
     resp,err := query_syncthing(config.Url + "/rest/version")
     if err == nil {
+        log.Println("displaying version")
         trayhost.UpdateCh <- trayhost.MenuItemUpdate{0, trayhost.MenuItem{
 				    fmt.Sprintf("Syncthing: %s", resp),
 				    true,
@@ -221,6 +224,7 @@ func get_config() error {
 
 
 func get_tray_config() error {
+log.Println("reading tray config")
     b, err := ioutil.ReadFile("config.xml")
     if err != nil { panic(err) }
 	err2 := xml.Unmarshal([]byte(b), &config)
@@ -244,6 +248,7 @@ func get_tray_config() error {
 }
 
 func update_self_status(){
+    log.Println("updating status")
     node_self.nodes_connected=0
     for _,v := range node {
         if v.connected {
@@ -252,6 +257,7 @@ func update_self_status(){
 
         }
     }
+    log.Printf("connected to %d nodes", node_self.nodes_connected)
     trayhost.UpdateCh <- trayhost.MenuItemUpdate{2, trayhost.MenuItem{
 			    fmt.Sprintf("Connected to %d Nodes", node_self.nodes_connected),
 			    true,
@@ -531,7 +537,7 @@ func main() {
 		},
 		3: trayhost.MenuItem{
 			"config not read yet...",
-			true,
+			false,
 			nil,
 		},
 		4: trayhost.MenuItem{
@@ -545,7 +551,7 @@ func main() {
 			trayhost.Exit,
 		}}
 
-	trayhost.Initialize("Trayhost example", icon_not_connected, menuItems)
+	trayhost.Initialize("Syncthing-Tray", icon_not_connected, menuItems)
 	trayhost.SetClickHandler(onClick)
 	trayhost.SetIconImage(trayhost.ICON_ALTERNATIVE, icon_not_connected)
 	trayhost.SetIconImage(trayhost.ICON_ATTENTION, icon_error)

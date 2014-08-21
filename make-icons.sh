@@ -7,7 +7,7 @@ echo "package main" >> "$OUTPUT"
 echo "" >> "$OUTPUT"
 for ICON in "icon_dl" "icon_error" "icon_idle" "icon_not_connected" "icon_ul" "icon_ul_dl"
 do
-    convert -background none img/$ICON.svg img/$ICON.png
+    convert -background none img/$ICON.svg -resize 32x32 img/$ICON.png
     $GOPATH/bin/2goarray $ICON main < img/$ICON.png |  grep -v package >> "$OUTPUT"
 done
 
