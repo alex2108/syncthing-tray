@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-//	"encoding/xml"
 	"flag"
 	"fmt"
 	"github.com/alex2108/trayhost"
@@ -11,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"crypto/tls"
 	"os"
 	"runtime"
 	"time"
@@ -25,17 +25,13 @@ type event struct {
 	Time time.Time              `json:"time"`
 	Data map[string]interface{} `json:"data"`
 }
-/*
-type Config struct {
-	XMLName xml.Name `xml:"config"`
-	Version int      `xml:"version,attr"`
-	ApiKey  string   `xml:"apikey"`
-	Url     string   `xml:"url"`
-}*/
 
 type Config struct {
 	ApiKey  string
 	Url     string
+	username string
+	password string
+	insecure bool
 }
 
 var config Config
@@ -79,7 +75,6 @@ func get_connections() error {
 	}
 
 	for deviceId, _ := range res {
-		//completion :=v.(map[string]interface{})["Completion"]
 		if deviceId != "total" {
 			log.Printf("connected: %d",device_self.devices_connected)
 			device[deviceId].connected = true
@@ -124,6 +119,11 @@ func get_folder_state() error {
 func query_syncthing(url string) (string, error) {
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("X-API-Key", config.ApiKey)
+	
+	if config.username != "" || config.password != "" {
+		req.SetBasicAuth(config.username, config.password)
+	}
+
 	response, err := client.Do(req)
 
 	if err != nil {
@@ -132,6 +132,9 @@ func query_syncthing(url string) (string, error) {
 	} else {
 		defer response.Body.Close()
 		contents, err := ioutil.ReadAll(response.Body)
+		if(response.StatusCode == 401) {
+			log.Fatal("Invalid username or password")
+		}
 		if err != nil {
 			log.Printf("ERROR: %s\n", err)
 			return "", err
@@ -220,31 +223,6 @@ func get_config() error {
 	return err
 }
 
-/*func get_tray_config() error {
-	log.Println("reading tray config")
-	b, err := ioutil.ReadFile("config.xml")
-	if err != nil {
-		panic(err)
-	}
-	err2 := xml.Unmarshal([]byte(b), &config)
-	if err2 != nil {
-		log.Printf("error: %v \n", err2)
-		return err2
-	}
-
-	trayhost.UpdateCh <- trayhost.MenuItemUpdate{3, trayhost.MenuItem{
-		"Open Syncthing GUI",
-		false,
-		func() {
-			log.Println("Opening Browser")
-			webbrowser.Open(config.Url)
-		},
-	},
-	}
-
-	return nil
-}*/
-
 func update_self_status() {
 	log.Println("updating status")
 	device_self.devices_connected = 0
@@ -313,6 +291,9 @@ func initialize() {
 				//conn.SetDeadline(time.Now().Add(time.Second * 20))
 				return conn, nil
 			},
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: config.insecure,
+			},
 			ResponseHeaderTimeout: time.Minute * 6,
 		},
 	}
@@ -323,11 +304,7 @@ func initialize() {
 func reinitialize() {
 	log.Println("(re)initializing")
 	since_events = 0
-	/*err := get_tray_config()
-	if err != nil {
-		log.Println("Config not found or other error with config, exiting")
-		panic(err)
-	}*/
+
 	log.Println("reading syncthing config")
 	err := get_config()
 	if err != nil {
@@ -358,25 +335,16 @@ func reinitialize() {
 }
 
 func set_latest_id() error {
-	req, err := http.NewRequest("GET", fmt.Sprintf("%s/rest/events?since=%d", config.Url, since_events), nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-	req.Header.Set("X-API-Key", config.ApiKey)
-	res, err := client.Do(req)
-	if err != nil {
-		log.Printf("Connection Error:")
-		log.Println(err)
-		return err
-	}
+	res, err := query_syncthing(fmt.Sprintf("%s/rest/events?since=%d", config.Url, since_events))
 
 	var events []event
-	err = json.NewDecoder(res.Body).Decode(&events)
+	err = json.Unmarshal([]byte(res), &events)
+
 	if err != nil {
 		log.Fatal(err)
 		return err
 	}
-	res.Body.Close()
+	
 
 	for _, event := range events {
 		since_events = event.ID
@@ -418,30 +386,21 @@ func update_ul() error {
 
 func main_loop() {
 	errors := false
-
-	//target:="localhost:8080"
-	//apikey:="asdf"
-	//since_events = 0
 	for {
 		ulOutdated := false
-		req, err := http.NewRequest("GET", fmt.Sprintf("%s/rest/events?since=%d", config.Url, since_events), nil)
-		if err != nil {
-			log.Fatal(err)
-		}
-		req.Header.Set("X-API-Key", config.ApiKey)
-		res, err := client.Do(req)
+		res, err := query_syncthing(fmt.Sprintf("%s/rest/events?since=%d", config.Url, since_events))
+
+
 		if err != nil { //usually connection error -> continue
 			log.Println(err)
 			errors = true
 		} else {
-
 			var events []event
-			err = json.NewDecoder(res.Body).Decode(&events)
+			err = json.Unmarshal([]byte(res), &events)
 			if err != nil {
 				log.Println(err)
 				errors = true
 			}
-			res.Body.Close()
 
 			for _, event := range events {
 				// handle different events
@@ -489,15 +448,20 @@ func main_loop() {
 func main() {
 
 	url := flag.String("target", "http://localhost:8080", "Target Syncthing instance")
-	config.ApiKey = *flag.String("apikey", "", "Syncthing API key (currently not needed)")
+	user := flag.String("u", "", "User")	
+	pw := flag.String("p", "", "Password")
+	insecure := flag.Bool("i", false, "skip verification of SSL certificate")
+	//config.ApiKey = *flag.String("apikey", "", "Syncthing API key (currently not needed)")
 	flag.Parse()
 
 	/*if *apikey == "" {
 		log.Fatal("Must give -apikey argument")
 	}*/
-	config.Url = *url;
+	config.Url = *url
+	config.username = *user
+	config.password = *pw
+	config.insecure = *insecure
 
-	
 	// EnterLoop must be called on the OS's main thread
 	runtime.LockOSThread()
 
