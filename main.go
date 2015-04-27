@@ -65,7 +65,7 @@ type Device_self struct {
 var device_self = Device_self{}
 
 func get_connections() error {
-	input, _ := query_syncthing(config.Url + "/rest/connections")
+	input, _ := query_syncthing(config.Url + "/rest/system/connections")
 
 	var res map[string]interface{}
 	err := json.Unmarshal([]byte(input), &res)
@@ -74,7 +74,7 @@ func get_connections() error {
 		device[deviceId].connected = false
 	}
 
-	for deviceId, _ := range res {
+	for deviceId, _ := range res["connections"].(map[string]interface{})  {
 		if deviceId != "total" {
 			log.Printf("connected: %d",device_self.devices_connected)
 			device[deviceId].connected = true
@@ -86,7 +86,7 @@ func get_connections() error {
 
 func get_folder_state() error {
 	for key, rep := range folder {
-		r_json, err := query_syncthing(config.Url + "/rest/model?folder=" + rep.id)
+		r_json, err := query_syncthing(config.Url + "/rest/db/status?folder=" + rep.id)
 
 		if err == nil {
 			type Folderstate struct {
@@ -150,7 +150,7 @@ func get_config() error {
 	device = make(map[string]*Device)
 	folder = make(map[string]*Folder)
 
-	r_json, err := query_syncthing(config.Url + "/rest/config")
+	r_json, err := query_syncthing(config.Url + "/rest/system/config")
 
 	if err == nil {
 		type SyncthingConfigDevice struct {
@@ -202,7 +202,7 @@ func get_config() error {
 
 	//Display version
 	log.Println("getting version")
-	resp, err := query_syncthing(config.Url + "/rest/version")
+	resp, err := query_syncthing(config.Url + "/rest/system/version")
 	if err == nil {
 		type STVersion struct {
 			Version     string
@@ -363,7 +363,7 @@ func update_ul() error {
 		for _, n := range r_info.sharedWith {
 			if device[n].connected { // only query connected devices
 				//log.Println("device="+ n +"folder=" + r)
-				out, err := query_syncthing(config.Url + "/rest/completion?device=" + n + "&folder=" + r)
+				out, err := query_syncthing(config.Url + "/rest/db/completion?device=" + n + "&folder=" + r)
 				if err != nil {
 					log.Println(err)
 					return err
