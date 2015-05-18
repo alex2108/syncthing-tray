@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -8,27 +9,22 @@ import (
 	"github.com/toqueteos/webbrowser"
 	"io/ioutil"
 	"log"
+	"math"
 	"net"
 	"net/http"
-	"crypto/tls"
 	"os"
+	"os/signal"
 	"runtime"
+	"syscall"
 	"time"
 )
 
-var client = &http.Client{}
 var since_events = 0
+var client = &http.Client{}
 
-type event struct {
-	ID   int                    `json:"id"`
-	Type string                 `json:"type"`
-	Time time.Time              `json:"time"`
-	Data map[string]interface{} `json:"data"`
-}
-
+// config for connection to syncthing
 type Config struct {
-	ApiKey  string
-	Url     string
+	Url      string
 	username string
 	password string
 	insecure bool
@@ -36,17 +32,19 @@ type Config struct {
 
 var config Config
 
+// configured devices
 type Device struct {
-	name       string
-	completion int
-	connected  bool
+	name             string
+	folderCompletion map[string]float64
+	connected        bool
 }
 
 var device map[string]*Device
 
+// configured folders
 type Folder struct {
 	id         string
-	completion int
+	completion float64
 	state      string
 	needFiles  int
 	sharedWith []string
@@ -54,44 +52,15 @@ type Folder struct {
 
 var folder map[string]*Folder
 
-type Device_self struct {
-	name            string
-	id              string
-	dl_completion   int //0 syncing, 1 complete
-	ul_completion   int //0 syncing, 1 complete
-	devices_connected int
-}
-
-var device_self = Device_self{}
-
-func get_connections() error {
-	input, _ := query_syncthing(config.Url + "/rest/system/connections")
-
-	var res map[string]interface{}
-	err := json.Unmarshal([]byte(input), &res)
-
-	for deviceId, _ := range device {
-		device[deviceId].connected = false
-	}
-
-	for deviceId, _ := range res["connections"].(map[string]interface{})  {
-		if deviceId != "total" {
-			log.Printf("connected: %d",device_self.devices_connected)
-			device[deviceId].connected = true
-		}
-	}
-
-	return err
-}
-
 func get_folder_state() error {
 	for key, rep := range folder {
 		r_json, err := query_syncthing(config.Url + "/rest/db/status?folder=" + rep.id)
 
 		if err == nil {
 			type Folderstate struct {
-				Needfiles int
-				State     string
+				NeedFiles   int
+				GlobalFiles int
+				State       string
 			}
 
 			var m Folderstate
@@ -100,11 +69,10 @@ func get_folder_state() error {
 			if json_err != nil {
 				return json_err
 			} else {
-				if m.Needfiles > 0 {
-					folder[key].state = "syncing"
-				} else {
-					folder[key].state = "idle"
-				}
+
+				folder[key].state = m.State
+				folder[key].needFiles = m.NeedFiles
+				folder[key].completion = 100 - 100*float64(m.NeedFiles)/math.Max(float64(m.GlobalFiles), 1) // max to prevent division by zero
 
 			}
 		} else {
@@ -115,35 +83,96 @@ func get_folder_state() error {
 
 	return nil
 }
+func get_connections() error {
+	input, _ := query_syncthing(config.Url + "/rest/system/connections")
 
-func query_syncthing(url string) (string, error) {
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("X-API-Key", config.ApiKey)
-	
-	if config.username != "" || config.password != "" {
-		req.SetBasicAuth(config.username, config.password)
+	var res map[string]interface{}
+	err := json.Unmarshal([]byte(input), &res)
+
+	for deviceId, _ := range device {
+		device[deviceId].connected = false
 	}
 
-	response, err := client.Do(req)
+	for deviceId, _ := range res["connections"].(map[string]interface{}) {
+		device[deviceId].connected = true
+	}
+
+	return err
+}
+func update_ul() error {
+
+	type Completion struct {
+		Completion float64
+	}
+	for r, r_info := range folder {
+		for _, n := range r_info.sharedWith {
+			if device[n].connected { // only query connected devices
+				out, err := query_syncthing(config.Url + "/rest/db/completion?device=" + n + "&folder=" + r)
+				if err != nil {
+					log.Println(err)
+					return err
+				}
+				var m Completion
+				err = json.Unmarshal([]byte(out), &m)
+				if err != nil {
+					log.Println(err)
+					return err
+				}
+				device[n].folderCompletion[r] = m.Completion
+			}
+		}
+	}
+	return nil
+}
+func set_latest_id() error {
+
+	type event struct {
+		ID int `json:"id"`
+	}
+
+	res, err := query_syncthing(fmt.Sprintf("%s/rest/events?since=%d", config.Url, since_events))
+
+	var events []event
+	err = json.Unmarshal([]byte(res), &events)
 
 	if err != nil {
-		log.Printf("ERROR: %s\n", err)
-		return "", err
-	} else {
-		defer response.Body.Close()
-		contents, err := ioutil.ReadAll(response.Body)
-		if(response.StatusCode == 401) {
-			log.Fatal("Invalid username or password")
-		}
-		if err != nil {
-			log.Printf("ERROR: %s\n", err)
-			return "", err
-		}
-		return string(contents), err
+		log.Fatal(err)
+		return err
 	}
-	return "", err
+
+	for _, event := range events {
+		since_events = event.ID
+	}
+
+	return nil
 }
 
+func initialize() {
+	since_events = 0 // reset event counter because syncthing could be restarted
+	err := get_config()
+	if err != nil {
+		log.Println(err)
+		log.Println("error getting syncthing config -> retry in 5s")
+
+		trayhost.UpdateCh <- trayhost.MenuItemUpdate{0, trayhost.MenuItem{
+			fmt.Sprintf("Syncthing: no connection to " + config.Url),
+			true,
+			nil,
+		},
+		}
+		trayhost.SetIcon(trayhost.ICON_ERROR)
+		time.Sleep(5 * time.Second)
+		initialize()
+	}
+	// get all previous events without processing them
+	set_latest_id()
+	// get current state
+	get_folder_state()
+	get_connections()
+	update_ul()
+	
+
+}
 func get_config() error {
 	log.Println("reading config from syncthing")
 	//create empty state
@@ -155,18 +184,18 @@ func get_config() error {
 	if err == nil {
 		type SyncthingConfigDevice struct {
 			Deviceid string
-			Name   string
+			Name     string
 		}
 		type SyncthingConfigFolderDevice struct {
 			Deviceid string
 		}
 
 		type SyncthingConfigFolder struct {
-			Id    string
+			Id      string
 			Devices []SyncthingConfigFolderDevice
 		}
 		type SyncthingConfig struct {
-			Devices        []SyncthingConfigDevice
+			Devices []SyncthingConfigDevice
 			Folders []SyncthingConfigFolder
 		}
 
@@ -179,13 +208,14 @@ func get_config() error {
 
 			//save Devices
 			for _, v := range m.Devices {
-				device[v.Deviceid] = &Device{v.Name, -1, false}
+				device[v.Deviceid] = &Device{v.Name, make(map[string]float64), false}
 			}
 			//save Folders
 			for _, v := range m.Folders {
-				folder[v.Id] = &Folder{v.Id, 0, "invald", 0, make([]string, 0)}
+				folder[v.Id] = &Folder{v.Id, 0, "invalid", 0, make([]string, 0)}
 				for _, v2 := range v.Devices {
 					folder[v.Id].sharedWith = append(folder[v.Id].sharedWith, v2.Deviceid)
+					device[v2.Deviceid].folderCompletion[v.Id] = -1
 				}
 			}
 
@@ -194,18 +224,12 @@ func get_config() error {
 		return err
 	}
 
-	device_self.name = "invalid"
-	device_self.id = "invalid"
-	device_self.dl_completion = 0
-	device_self.ul_completion = 0
-	device_self.devices_connected = 0
-
 	//Display version
 	log.Println("getting version")
 	resp, err := query_syncthing(config.Url + "/rest/system/version")
 	if err == nil {
 		type STVersion struct {
-			Version     string
+			Version string
 		}
 
 		var m STVersion
@@ -223,64 +247,177 @@ func get_config() error {
 	return err
 }
 
-func update_self_status() {
-	log.Println("updating status")
-	device_self.devices_connected = 0
-	for _, v := range device {
-		if v.connected {
-			device_self.devices_connected++
+func query_syncthing(url string) (string, error) {
+	req, _ := http.NewRequest("GET", url, nil)
+	//req.Header.Set("X-API-Key", config.ApiKey)
+
+	if config.username != "" || config.password != "" {
+		req.SetBasicAuth(config.username, config.password)
+	}
+
+	response, err := client.Do(req)
+
+	if err != nil {
+		log.Printf("ERROR: %s\n", err)
+		return "", err
+	} else {
+		defer response.Body.Close()
+		contents, err := ioutil.ReadAll(response.Body)
+		if response.StatusCode == 401 {
+			log.Fatal("Invalid username or password")
+		}
+		if err != nil {
+			log.Printf("ERROR: %s\n", err)
+			return "", err
+		}
+		return string(contents), err
+	}
+	return "", err
+}
+
+func main_loop() {
+	type folderSummary struct {
+		NeedFiles   int    `json:"needFiles"`
+		State       string `json:"state"`
+		GlobalFiles int    `json:"globalFiles"`
+	}
+
+	type eventData struct {
+		Folder     string        `json:"folder"`
+		Summary    folderSummary `json:"summary"`
+		Completion float64       `json:"completion"`
+		Device     string        `json:"device"`
+		Id         string        `json:"id"`
+	}
+	type event struct {
+		ID   int       `json:"id"`
+		Type string    `json:"type"`
+		Time time.Time `json:"time"`
+		Data eventData `json:"data"`
+	}
+
+	for {
+		res, err := query_syncthing(fmt.Sprintf("%s/rest/events?since=%d", config.Url, since_events))
+
+		if err != nil { //usually connection error -> continue
+			log.Println(err)
+			initialize()
+		} else {
+			var events []event
+			err = json.Unmarshal([]byte(res), &events)
+			if err != nil {
+				log.Println(err)
+				initialize()
+			}
+
+			for _, event := range events {
+				// handle different events
+				if event.Type == "FolderSummary" {
+					folder[event.Data.Folder].needFiles = event.Data.Summary.NeedFiles
+					folder[event.Data.Folder].state = event.Data.Summary.State
+					folder[event.Data.Folder].completion = 100 - 100*float64(event.Data.Summary.NeedFiles)/math.Max(float64(event.Data.Summary.GlobalFiles), 1)
+
+					updateStatus()
+
+				} else if event.Type == "FolderCompletion" {
+					device[event.Data.Device].folderCompletion[event.Data.Folder] = event.Data.Completion
+
+					updateStatus()
+
+				} else if event.Type == "DeviceConnected" {
+					log.Println(event.Data.Id, "connected")
+					device[event.Data.Id].connected = true
+					updateStatus()
+
+				} else if event.Type == "DeviceDisconnected" {
+					log.Println(event.Data.Id, "disconnected")
+					device[event.Data.Id].connected = false
+					updateStatus()
+				}
+				since_events = event.ID
+			}
+
 		}
 	}
-	log.Printf("connected to %d devices", device_self.devices_connected)
+}
+
+func updateStatus() {
+	log.Println("updating status")
+
+	downloading := false
+	uploading := false
+	numConnected := 0
+
+	for _, fol_info := range folder {
+		//log.Printf("folder %v",fol)
+		//log.Printf("folder_info %v",fol_info)
+		if fol_info.completion < 100 {
+			downloading = true
+		}
+	}
+
+	for _, dev_info := range device {
+		//%log.Printf("device %v",dev)
+		//log.Printf("device_info %v",dev_info)
+
+		if dev_info.connected {
+			numConnected++
+
+			for _, completion := range dev_info.folderCompletion {
+				if completion < 100 {
+					uploading = true
+				}
+			}
+		}
+
+	}
+
+	log.Printf("connected %v", numConnected)
+
 	trayhost.UpdateCh <- trayhost.MenuItemUpdate{2, trayhost.MenuItem{
-		fmt.Sprintf("Connected to %d Devices", device_self.devices_connected),
+		fmt.Sprintf("Connected to %d Devices", numConnected),
 		true,
 		nil,
 	},
 	}
 
-	device_self.dl_completion = 1
-	for _, v := range folder {
-		if v.state == "syncing" {
-			log.Printf("%s is syncing, setting state to downloading", v.id)
-			device_self.dl_completion = 0
-		}
-	}
-}
-
-func update_icon() {
-	log.Println("Updating icon...")
-	update_self_status()
-
-	if device_self.devices_connected == 0 {
+	if numConnected == 0 {
 		//not connected
 		trayhost.SetIcon(trayhost.ICON_NOT_CONNECTED)
 		log.Println("not connected")
-	} else if device_self.ul_completion == 0 && device_self.dl_completion == 0 {
+	} else if downloading && uploading {
 		//ul+dl
 		log.Println("ul+dl")
 		trayhost.SetIcon(trayhost.ICON_UL_DL)
-	} else if device_self.ul_completion == 1 && device_self.dl_completion == 0 {
+	} else if downloading && !uploading {
 		//dl
 		log.Println("dl")
 		trayhost.SetIcon(trayhost.ICON_DL)
-	} else if device_self.ul_completion == 0 && device_self.dl_completion == 1 {
+	} else if !downloading && uploading {
 		//ul
 		log.Println("ul")
 		trayhost.SetIcon(trayhost.ICON_UL)
-	} else if device_self.ul_completion == 1 && device_self.dl_completion == 1 {
+	} else if !downloading && !uploading {
 		//idle
 		log.Println("idle")
 		trayhost.SetIcon(trayhost.ICON_IDLE)
 	}
+
 }
 
-func initialize() {
-	log.SetOutput(os.Stdout)
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
+func main() {
 
-	log.Println("Starting Syncthing-Tray")
-	log.Println("Connecting to syncthing at",config.Url)
+	url := flag.String("target", "http://localhost:8080", "Target Syncthing instance")
+	user := flag.String("u", "", "User")
+	pw := flag.String("p", "", "Password")
+	insecure := flag.Bool("i", false, "skip verification of SSL certificate")
+	flag.Parse()
+
+	config.Url = *url
+	config.username = *user
+	config.password = *pw
+	config.insecure = *insecure
+
 	client = &http.Client{
 		Transport: &http.Transport{
 			Dial: func(netw, addr string) (net.Conn, error) {
@@ -297,170 +434,6 @@ func initialize() {
 			ResponseHeaderTimeout: time.Minute * 6,
 		},
 	}
-
-	reinitialize()
-}
-
-func reinitialize() {
-	log.Println("(re)initializing")
-	since_events = 0
-
-	log.Println("reading syncthing config")
-	err := get_config()
-	if err != nil {
-		log.Println(err)
-		log.Println("error getting syncthing config -> retry in 5s")
-
-		trayhost.UpdateCh <- trayhost.MenuItemUpdate{0, trayhost.MenuItem{
-			fmt.Sprintf("Syncthing: no connection to " + config.Url),
-			true,
-			nil,
-		},
-		}
-		update_self_status()
-		trayhost.SetIcon(trayhost.ICON_ERROR)
-		time.Sleep(5 * time.Second)
-		reinitialize()
-	} else {
-		log.Println("reading past events")
-		set_latest_id()
-		log.Println("reading folder state")
-		get_folder_state()
-		log.Println("reading connections")
-		get_connections()
-		log.Println("reading upload status")
-		update_ul()
-		update_icon()
-	}
-}
-
-func set_latest_id() error {
-	res, err := query_syncthing(fmt.Sprintf("%s/rest/events?since=%d", config.Url, since_events))
-
-	var events []event
-	err = json.Unmarshal([]byte(res), &events)
-
-	if err != nil {
-		log.Fatal(err)
-		return err
-	}
-	
-
-	for _, event := range events {
-		since_events = event.ID
-	}
-
-	return nil
-}
-
-func update_ul() error {
-
-	type Completion struct {
-		Completion float64
-	}
-	device_self.ul_completion = 1
-	for r, r_info := range folder {
-		for _, n := range r_info.sharedWith {
-			if device[n].connected { // only query connected devices
-				//log.Println("device="+ n +"folder=" + r)
-				out, err := query_syncthing(config.Url + "/rest/db/completion?device=" + n + "&folder=" + r)
-				if err != nil {
-					log.Println(err)
-					return err
-				}
-
-				var m Completion
-				err = json.Unmarshal([]byte(out), &m)
-				if err != nil {
-					log.Println(err)
-					return err
-				}
-				if m.Completion < 100 { //any folder on any device not updated -> uploading
-					device_self.ul_completion = 0
-				}
-			}
-		}
-	}
-	return nil
-}
-
-func main_loop() {
-	errors := false
-	for {
-		ulOutdated := false
-		res, err := query_syncthing(fmt.Sprintf("%s/rest/events?since=%d", config.Url, since_events))
-
-
-		if err != nil { //usually connection error -> continue
-			log.Println(err)
-			errors = true
-		} else {
-			var events []event
-			err = json.Unmarshal([]byte(res), &events)
-			if err != nil {
-				log.Println(err)
-				errors = true
-			}
-
-			for _, event := range events {
-				// handle different events
-				if event.Type == "StateChanged" &&
-				event.Data["to"].(string) != "scanning" && // don't display scanning and cleaning
-				event.Data["to"].(string) != "cleaning" &&
-				folder[event.Data["folder"].(string)].state != event.Data["to"].(string) {
-					log.Printf("Changed state")
-					str := fmt.Sprintf("%s: %s -> %s", event.Data["folder"].(string), folder[event.Data["folder"].(string)].state, event.Data["to"].(string))
-					log.Printf(str)
-					folder[event.Data["folder"].(string)].state = event.Data["to"].(string)
-					update_icon()
-				} else if event.Type == "DeviceConnected" {
-					str := fmt.Sprintf("connected: %s", event.Data["id"].(string))
-					log.Printf(str)
-
-					device[event.Data["id"].(string)].connected = true
-					update_icon()
-				} else if event.Type == "DeviceDisconnected" {
-					str := fmt.Sprintf("disconnected: %s", event.Data["id"].(string))
-					log.Printf(str)
-					device[event.Data["id"].(string)].connected = false
-					ulOutdated = true // we maybe uploaded to this device
-					update_icon()
-				} else if event.Type == "RemoteIndexUpdated" || event.Type == "LocalIndexUpdated" {
-					ulOutdated = true
-				}
-				since_events = event.ID
-			}
-
-			if ulOutdated {
-				update_ul()
-				update_icon()
-				time.Sleep(1 * time.Second) // sleep 1 second to prevent doing this too often because many "IndexUpdated" can be sent in a short time
-			}
-		}
-		if errors {
-			log.Printf("Found errors -> reinitialize")
-			errors = false
-			reinitialize()
-		}
-	}
-}
-
-func main() {
-
-	url := flag.String("target", "http://localhost:8080", "Target Syncthing instance")
-	user := flag.String("u", "", "User")	
-	pw := flag.String("p", "", "Password")
-	insecure := flag.Bool("i", false, "skip verification of SSL certificate")
-	//config.ApiKey = *flag.String("apikey", "", "Syncthing API key (currently not needed)")
-	flag.Parse()
-
-	/*if *apikey == "" {
-		log.Fatal("Must give -apikey argument")
-	}*/
-	config.Url = *url
-	config.username = *user
-	config.password = *pw
-	config.insecure = *insecure
 
 	// EnterLoop must be called on the OS's main thread
 	runtime.LockOSThread()
@@ -500,7 +473,7 @@ func main() {
 			trayhost.Exit,
 		}}
 
-	trayhost.Initialize("Syncthing-Tray", icon_not_connected, menuItems)
+	trayhost.Initialize("Syncthing-Tray", icon_error, menuItems)
 	trayhost.SetClickHandler(onClick)
 	trayhost.SetIconImage(trayhost.ICON_ALTERNATIVE, icon_not_connected)
 	trayhost.SetIconImage(trayhost.ICON_ATTENTION, icon_error)
@@ -511,10 +484,23 @@ func main() {
 	trayhost.SetIconImage(trayhost.ICON_ERROR, icon_error)
 	trayhost.SetIconImage(trayhost.ICON_UL_DL, icon_ul_dl)
 
-	
-	
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	signal.Notify(c, syscall.SIGTERM)
+	go func() {
+		<-c
+		trayhost.Exit()
+	}()
+
+	log.SetOutput(os.Stdout)
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+	log.Println("Starting Syncthing-Tray")
+	log.Println("Connecting to syncthing at", config.Url)
+
 	go func() {
 		initialize()
+		updateStatus()
 		main_loop()
 	}()
 
@@ -522,7 +508,7 @@ func main() {
 	trayhost.EnterLoop()
 
 	// This is only reached once the user chooses the Exit menu item
-	fmt.Println("Exiting")
+	log.Println("Exiting syncthing-tray")
 }
 
 func onClick() { // not usable on ubuntu, left click also displays the menu
