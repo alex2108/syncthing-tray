@@ -407,7 +407,7 @@ func updateStatus() {
 
 func main() {
 
-	url := flag.String("target", "http://localhost:8080", "Target Syncthing instance")
+	url := flag.String("target", "http://localhost:8384", "Target Syncthing instance")
 	user := flag.String("u", "", "User")
 	pw := flag.String("p", "", "Password")
 	insecure := flag.Bool("i", false, "skip verification of SSL certificate")
