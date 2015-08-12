@@ -2,7 +2,7 @@ syncthing-tray
 ==============
 Simple tray application for [syncthing](https://github.com/calmh/syncthing/)
 
-Connects to syncthing at `http://localhost:8080` or any other url by setting the command line parameter ` -target="http://localhost:8080"`
+Connects to syncthing at `http://localhost:8384` or any other url by setting the command line parameter ` -target="http://localhost:8384"`
 
 
 Building
