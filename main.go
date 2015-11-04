@@ -1,26 +1,33 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/alex2108/trayhost"
+	"github.com/AislerHQ/trayhost"
 	"github.com/toqueteos/webbrowser"
-	"io/ioutil"
 	"log"
 	"math"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
 	"syscall"
 	"time"
+	"errors" 
 )
 
+const (
+	ICON_IDLE          = 1
+	ICON_NOT_CONNECTED = 2
+	ICON_DL            = 3
+	ICON_UL            = 4
+	ICON_ERROR         = 5
+	ICON_UL_DL         = 6
+)
+
+
 var since_events = 0
-var client = &http.Client{}
+var startTime = "-"
 
 // config for connection to syncthing
 type Config struct {
@@ -29,6 +36,8 @@ type Config struct {
 	password string
 	insecure bool
 }
+
+
 
 var config Config
 
@@ -43,239 +52,18 @@ var device map[string]*Device
 
 // configured folders
 type Folder struct {
-	id         string
-	completion float64
-	state      string
-	needFiles  int
-	sharedWith []string
+	id               string
+	completion       float64
+	state            string
+	needFiles        int
+	sharedWith       []string
 }
 
 var folder map[string]*Folder
 
-func get_folder_state() error {
-	for key, rep := range folder {
-		r_json, err := query_syncthing(config.Url + "/rest/db/status?folder=" + rep.id)
 
-		if err == nil {
-			type Folderstate struct {
-				NeedFiles   int
-				GlobalFiles int
-				State       string
-			}
 
-			var m Folderstate
-			json_err := json.Unmarshal([]byte(r_json), &m)
-
-			if json_err != nil {
-				return json_err
-			} else {
-
-				folder[key].state = m.State
-				folder[key].needFiles = m.NeedFiles
-				folder[key].completion = 100 - 100*float64(m.NeedFiles)/math.Max(float64(m.GlobalFiles), 1) // max to prevent division by zero
-
-			}
-		} else {
-			return err
-		}
-
-	}
-
-	return nil
-}
-func get_connections() error {
-	input, _ := query_syncthing(config.Url + "/rest/system/connections")
-
-	var res map[string]interface{}
-	err := json.Unmarshal([]byte(input), &res)
-
-	for deviceId, _ := range device {
-		device[deviceId].connected = false
-	}
-
-	for deviceId, _ := range res["connections"].(map[string]interface{}) {
-		device[deviceId].connected = true
-	}
-
-	return err
-}
-func update_ul() error {
-
-	type Completion struct {
-		Completion float64
-	}
-	for r, r_info := range folder {
-		for _, n := range r_info.sharedWith {
-			if device[n].connected { // only query connected devices
-				out, err := query_syncthing(config.Url + "/rest/db/completion?device=" + n + "&folder=" + r)
-				if err != nil {
-					log.Println(err)
-					return err
-				}
-				var m Completion
-				err = json.Unmarshal([]byte(out), &m)
-				if err != nil {
-					log.Println(err)
-					return err
-				}
-				device[n].folderCompletion[r] = m.Completion
-			}
-		}
-	}
-	return nil
-}
-func set_latest_id() error {
-
-	type event struct {
-		ID int `json:"id"`
-	}
-
-	res, err := query_syncthing(fmt.Sprintf("%s/rest/events?since=%d", config.Url, since_events))
-
-	var events []event
-	err = json.Unmarshal([]byte(res), &events)
-
-	if err != nil {
-		log.Fatal(err)
-		return err
-	}
-
-	for _, event := range events {
-		since_events = event.ID
-	}
-
-	return nil
-}
-
-func initialize() {
-	since_events = 0 // reset event counter because syncthing could be restarted
-	err := get_config()
-	if err != nil {
-		log.Println(err)
-		log.Println("error getting syncthing config -> retry in 5s")
-
-		trayhost.UpdateCh <- trayhost.MenuItemUpdate{0, trayhost.MenuItem{
-			fmt.Sprintf("Syncthing: no connection to " + config.Url),
-			true,
-			nil,
-		},
-		}
-		trayhost.SetIcon(trayhost.ICON_ERROR)
-		time.Sleep(5 * time.Second)
-		initialize()
-	}
-	// get all previous events without processing them
-	set_latest_id()
-	// get current state
-	get_folder_state()
-	get_connections()
-	update_ul()
-	
-
-}
-func get_config() error {
-	log.Println("reading config from syncthing")
-	//create empty state
-	device = make(map[string]*Device)
-	folder = make(map[string]*Folder)
-
-	r_json, err := query_syncthing(config.Url + "/rest/system/config")
-
-	if err == nil {
-		type SyncthingConfigDevice struct {
-			Deviceid string
-			Name     string
-		}
-		type SyncthingConfigFolderDevice struct {
-			Deviceid string
-		}
-
-		type SyncthingConfigFolder struct {
-			Id      string
-			Devices []SyncthingConfigFolderDevice
-		}
-		type SyncthingConfig struct {
-			Devices []SyncthingConfigDevice
-			Folders []SyncthingConfigFolder
-		}
-
-		var m SyncthingConfig
-		json_err := json.Unmarshal([]byte(r_json), &m)
-
-		if json_err != nil {
-			return json_err
-		} else { // save config in structs
-
-			//save Devices
-			for _, v := range m.Devices {
-				device[v.Deviceid] = &Device{v.Name, make(map[string]float64), false}
-			}
-			//save Folders
-			for _, v := range m.Folders {
-				folder[v.Id] = &Folder{v.Id, 0, "invalid", 0, make([]string, 0)}
-				for _, v2 := range v.Devices {
-					folder[v.Id].sharedWith = append(folder[v.Id].sharedWith, v2.Deviceid)
-					device[v2.Deviceid].folderCompletion[v.Id] = -1
-				}
-			}
-
-		}
-	} else {
-		return err
-	}
-
-	//Display version
-	log.Println("getting version")
-	resp, err := query_syncthing(config.Url + "/rest/system/version")
-	if err == nil {
-		type STVersion struct {
-			Version string
-		}
-
-		var m STVersion
-		err = json.Unmarshal([]byte(resp), &m)
-		if err == nil {
-			log.Println("displaying version")
-			trayhost.UpdateCh <- trayhost.MenuItemUpdate{0, trayhost.MenuItem{
-				fmt.Sprintf("Syncthing: %s", m.Version),
-				true,
-				nil,
-			},
-			}
-		}
-	}
-	return err
-}
-
-func query_syncthing(url string) (string, error) {
-	req, _ := http.NewRequest("GET", url, nil)
-	//req.Header.Set("X-API-Key", config.ApiKey)
-
-	if config.username != "" || config.password != "" {
-		req.SetBasicAuth(config.username, config.password)
-	}
-
-	response, err := client.Do(req)
-
-	if err != nil {
-		log.Printf("ERROR: %s\n", err)
-		return "", err
-	} else {
-		defer response.Body.Close()
-		contents, err := ioutil.ReadAll(response.Body)
-		if response.StatusCode == 401 {
-			log.Fatal("Invalid username or password")
-		}
-		if err != nil {
-			log.Printf("ERROR: %s\n", err)
-			return "", err
-		}
-		return string(contents), err
-	}
-	return "", err
-}
-
-func main_loop() {
+func readEvents() error {
 	type folderSummary struct {
 		NeedFiles   int    `json:"needFiles"`
 		State       string `json:"state"`
@@ -296,49 +84,68 @@ func main_loop() {
 		Data eventData `json:"data"`
 	}
 
-	for {
-		res, err := query_syncthing(fmt.Sprintf("%s/rest/events?since=%d", config.Url, since_events))
+	res, err := query_syncthing(fmt.Sprintf("%s/rest/events?since=%d", config.Url, since_events))
 
-		if err != nil { //usually connection error -> continue
-			log.Println(err)
-			initialize()
-		} else {
-			var events []event
-			err = json.Unmarshal([]byte(res), &events)
-			if err != nil {
-				log.Println(err)
-				initialize()
-			}
-
-			for _, event := range events {
-				// handle different events
-				if event.Type == "FolderSummary" {
-					folder[event.Data.Folder].needFiles = event.Data.Summary.NeedFiles
-					folder[event.Data.Folder].state = event.Data.Summary.State
-					folder[event.Data.Folder].completion = 100 - 100*float64(event.Data.Summary.NeedFiles)/math.Max(float64(event.Data.Summary.GlobalFiles), 1)
-
-					updateStatus()
-
-				} else if event.Type == "FolderCompletion" {
-					device[event.Data.Device].folderCompletion[event.Data.Folder] = event.Data.Completion
-
-					updateStatus()
-
-				} else if event.Type == "DeviceConnected" {
-					log.Println(event.Data.Id, "connected")
-					device[event.Data.Id].connected = true
-					updateStatus()
-
-				} else if event.Type == "DeviceDisconnected" {
-					log.Println(event.Data.Id, "disconnected")
-					device[event.Data.Id].connected = false
-					updateStatus()
-				}
-				since_events = event.ID
-			}
-
+	if err != nil { //usually connection error -> continue
+		//log.Println(err)
+		return err
+	} else {
+		var events []event
+		err = json.Unmarshal([]byte(res), &events)
+		if err != nil {
+			//log.Println(err)
+			return err
 		}
+
+		for _, event := range events {
+			// handle different events
+			if event.Type == "FolderSummary" {
+				folder[event.Data.Folder].needFiles = event.Data.Summary.NeedFiles
+				folder[event.Data.Folder].state = event.Data.Summary.State
+				folder[event.Data.Folder].completion = 100 - 100*float64(event.Data.Summary.NeedFiles)/math.Max(float64(event.Data.Summary.GlobalFiles), 1)
+
+				updateStatus()
+
+			} else if event.Type == "FolderCompletion" {
+				device[event.Data.Device].folderCompletion[event.Data.Folder] = event.Data.Completion
+
+				updateStatus()
+
+			} else if event.Type == "DeviceConnected" {
+				log.Println(event.Data.Id, "connected")
+				device[event.Data.Id].connected = true
+				updateStatus()
+
+			} else if event.Type == "DeviceDisconnected" {
+				log.Println(event.Data.Id, "disconnected")
+				device[event.Data.Id].connected = false
+				updateStatus()
+			} else if event.Type == "ConfigSaved" {
+				log.Println("got new config -> reinitialize")
+				since_events = event.ID
+				return errors.New("got new config") 
+
+			}
+			since_events = event.ID
+		}
+
 	}
+
+	return nil
+}
+
+func main_loop() {
+	for {
+		err := readEvents()
+		if err != nil {
+			defer initialize()
+			log.Println("error while reading events:",err)
+			return
+		}
+		
+		
+	}
+
 }
 
 func updateStatus() {
@@ -383,33 +190,38 @@ func updateStatus() {
 
 	if numConnected == 0 {
 		//not connected
-		trayhost.SetIcon(trayhost.ICON_NOT_CONNECTED)
 		log.Println("not connected")
+		err := trayhost.SetIcon(ICON_NOT_CONNECTED)
+		log.Println(err)
 	} else if downloading && uploading {
 		//ul+dl
 		log.Println("ul+dl")
-		trayhost.SetIcon(trayhost.ICON_UL_DL)
+		err := trayhost.SetIcon(ICON_UL_DL)
+		log.Println(err)
 	} else if downloading && !uploading {
 		//dl
 		log.Println("dl")
-		trayhost.SetIcon(trayhost.ICON_DL)
+		err := trayhost.SetIcon(ICON_DL)
+		log.Println(err)
 	} else if !downloading && uploading {
 		//ul
 		log.Println("ul")
-		trayhost.SetIcon(trayhost.ICON_UL)
+		err := trayhost.SetIcon(ICON_UL)
+		log.Println(err)
 	} else if !downloading && !uploading {
 		//idle
 		log.Println("idle")
-		trayhost.SetIcon(trayhost.ICON_IDLE)
+		err := trayhost.SetIcon(ICON_IDLE)
+		log.Println(err)
 	}
 
 }
 
 func main() {
-
 	url := flag.String("target", "http://localhost:8384", "Target Syncthing instance")
 	user := flag.String("u", "", "User")
 	pw := flag.String("p", "", "Password")
+	iconDir := flag.String("icondir", os.TempDir(), "Directory to store temporary icons")
 	insecure := flag.Bool("i", false, "skip verification of SSL certificate")
 	flag.Parse()
 
@@ -417,23 +229,6 @@ func main() {
 	config.username = *user
 	config.password = *pw
 	config.insecure = *insecure
-
-	client = &http.Client{
-		Transport: &http.Transport{
-			Dial: func(netw, addr string) (net.Conn, error) {
-				conn, err := net.DialTimeout(netw, addr, time.Second*10)
-				if err != nil {
-					return nil, err
-				}
-				//conn.SetDeadline(time.Now().Add(time.Second * 20))
-				return conn, nil
-			},
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: config.insecure,
-			},
-			ResponseHeaderTimeout: time.Minute * 6,
-		},
-	}
 
 	// EnterLoop must be called on the OS's main thread
 	runtime.LockOSThread()
@@ -473,16 +268,16 @@ func main() {
 			trayhost.Exit,
 		}}
 
-	trayhost.Initialize("Syncthing-Tray", icon_error, menuItems)
+	trayhost.Initialize("Syncthing-Tray", icon_error, menuItems, *iconDir)
 	trayhost.SetClickHandler(onClick)
-	trayhost.SetIconImage(trayhost.ICON_ALTERNATIVE, icon_not_connected)
-	trayhost.SetIconImage(trayhost.ICON_ATTENTION, icon_error)
-	trayhost.SetIconImage(trayhost.ICON_IDLE, icon_idle)
-	trayhost.SetIconImage(trayhost.ICON_NOT_CONNECTED, icon_not_connected)
-	trayhost.SetIconImage(trayhost.ICON_DL, icon_dl)
-	trayhost.SetIconImage(trayhost.ICON_UL, icon_ul)
-	trayhost.SetIconImage(trayhost.ICON_ERROR, icon_error)
-	trayhost.SetIconImage(trayhost.ICON_UL_DL, icon_ul_dl)
+	//trayhost.SetIconImage(ICON_ALTERNATIVE, icon_not_connected)
+	//trayhost.SetIconImage(ICON_ATTENTION, icon_error)
+	trayhost.SetIconImage(ICON_IDLE, icon_idle)
+	trayhost.SetIconImage(ICON_NOT_CONNECTED, icon_not_connected)
+	trayhost.SetIconImage(ICON_DL, icon_dl)
+	trayhost.SetIconImage(ICON_UL, icon_ul)
+	trayhost.SetIconImage(ICON_ERROR, icon_error)
+	trayhost.SetIconImage(ICON_UL_DL, icon_ul_dl)
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
@@ -500,8 +295,6 @@ func main() {
 
 	go func() {
 		initialize()
-		updateStatus()
-		main_loop()
 	}()
 
 	// Enter the host system's event loop
