@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/AislerHQ/trayhost"
+	"github.com/thomasf/systray"
 	"log"
 	"math"
 	"time"
@@ -11,11 +11,12 @@ import (
 
 func get_folder_state() error {
 	for key, rep := range folder {
+		mutex.Lock()
 		if folder[key].completion >= 0 {
 			log.Println("already got info for folder",key,"from events, skipping")
+			mutex.Unlock()
 			continue
 		}
-	
 		r_json, err := query_syncthing(config.Url + "/rest/db/status?folder=" + rep.id)
 		log.Println("getting state for folder",rep.id)
 		if err == nil {
@@ -29,6 +30,7 @@ func get_folder_state() error {
 			json_err := json.Unmarshal([]byte(r_json), &m)
 
 			if json_err != nil {
+				mutex.Unlock()
 				return json_err
 			} else {
 
@@ -38,18 +40,21 @@ func get_folder_state() error {
 
 			}
 		} else {
+			mutex.Unlock()
 			return err
 		}
-		
-		// read events again to possibly prevent more expensive api calls
-		since_events = since_events-1 // instantly return even if no new events are there
-		readEvents()
-
+		mutex.Unlock()
+		// let events be processed, might save some expensive api calls
+		for len(eventChan)>0 {
+			time.Sleep(time.Millisecond)
+		}
 	}
 
 	return nil
 }
 func get_connections() error {
+	mutex.Lock()
+	defer mutex.Unlock()
 	log.Println("getting connections")
 	input, err := query_syncthing(config.Url + "/rest/system/connections")
 	if err != nil {
@@ -67,7 +72,7 @@ func get_connections() error {
 		connectionState := m.(map[string]interface{})
 		device[deviceId].connected = connectionState["connected"].(bool)
 	}
-
+	
 	return err
 }
 func update_ul() error {
@@ -77,8 +82,10 @@ func update_ul() error {
 	}
 	for r, r_info := range folder {
 		for _, n := range r_info.sharedWith {
+			mutex.Lock()
 			if device[n].folderCompletion[r] >= 0 {
 				log.Println("already got info for device",n,"folder",r,"from events, skipping")
+				mutex.Unlock()
 				continue
 			}
 		
@@ -87,51 +94,28 @@ func update_ul() error {
 				log.Println("updating upload status for device",n,"folder",r)
 				if err != nil {
 					log.Println(err)
+					mutex.Unlock()
 					return err
 				}
 				var m Completion
 				err = json.Unmarshal([]byte(out), &m)
 				if err != nil {
 					log.Println(err)
+					mutex.Unlock()
 					return err
 				}
 				device[n].folderCompletion[r] = m.Completion
 			}
-			// read events again to possibly prevent more expensive api calls
-			since_events = since_events-1 // instantly return even if no new events are there
-			readEvents()
-			
+			mutex.Unlock()
+			// let events be processed, might save some expensive api calls
+			for len(eventChan)>0 {
+				time.Sleep(time.Millisecond)
+			}
 		}
 	}
 	return nil
 }
-func set_latest_id() error {
-	log.Println("reading latest event id")
-	type event struct {
-		ID int `json:"id"`
-	}
 
-	res, err := query_syncthing(fmt.Sprintf("%s/rest/events?since=%d", config.Url, since_events))
-
-	if err != nil {
-		log.Println(err)
-		return err
-	}
-
-	var events []event
-	err = json.Unmarshal([]byte(res), &events)
-
-	if err != nil {
-		log.Fatal(err)
-		return err
-	}
-
-	for _, event := range events {
-		since_events = event.ID
-	}
-
-	return nil
-}
 
 func getStartTime() (string, error){
 
@@ -157,11 +141,17 @@ func getStartTime() (string, error){
 
 }
 
-
-
-
-
+// helper to get a lock before starting the new thread that can run in background after a lock is aquired
 func initialize() {
+	// block all before config is read
+	eventMutex.Lock() 
+	mutex.Lock()
+	go initializeLocked()
+}
+
+
+func initializeLocked() {
+
 	currentStartTime, err := getStartTime()
 	if err == nil {
 		
@@ -172,10 +162,10 @@ func initialize() {
 		}
 		err = get_config()
 	}
-	// read events at the beginning to already set some values to decrease the number of expensive calls
-	if err == nil {
-		err = readEvents()
-	}
+	eventChan = make(chan event,10000)
+	go eventProcessor() //start processing events again
+	eventMutex.Unlock()
+	mutex.Unlock()
 	// get current state
 	if err == nil {
 		err = get_folder_state()
@@ -188,25 +178,24 @@ func initialize() {
 	}
 	
 	if err != nil {
+		eventMutex.Lock() 
+		mutex.Lock()
 		log.Println(err)
 		log.Println("error getting syncthing config -> retry in 5s")
 
-		trayhost.UpdateCh <- trayhost.MenuItemUpdate{0, trayhost.MenuItem{
-			fmt.Sprintf("Syncthing: no connection to " + config.Url),
-			true,
-			nil,
-		},
-		}
-		err = trayhost.SetIcon(ICON_ERROR)
-		log.Println(err)
+
+		trayMutex.Lock()
+		trayEntries.stVersion.SetTitle(fmt.Sprintf("Syncthing: no connection to " + config.Url))
+		trayMutex.Unlock()
+
+		systray.SetIcon(icon_error)
 		time.Sleep(5 * time.Second)
-		defer initialize()
+		initializeLocked()
 		return
 	}
-	
 	updateStatus()
-	log.Println("starting main loop")
-	main_loop()
+
+	
 
 }
 func get_config() error {
@@ -273,12 +262,10 @@ func get_config() error {
 		err = json.Unmarshal([]byte(resp), &m)
 		if err == nil {
 			log.Println("displaying version")
-			trayhost.UpdateCh <- trayhost.MenuItemUpdate{0, trayhost.MenuItem{
-				fmt.Sprintf("Syncthing: %s", m.Version),
-				true,
-				nil,
-			},
-			}
+			trayMutex.Lock()
+			trayEntries.stVersion.SetTitle(fmt.Sprintf("Syncthing: %s", m.Version))
+			trayMutex.Unlock()
+			
 		}
 	}
 	return err

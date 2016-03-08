@@ -30,11 +30,7 @@ func query_syncthing(url string) (string, error) {
 
 
 	req, _ := http.NewRequest("GET", url, nil)
-	//req.Header.Set("X-API-Key", config.ApiKey)
-
-	if config.username != "" || config.password != "" {
-		req.SetBasicAuth(config.username, config.password)
-	}
+	req.Header.Set("X-API-Key", config.ApiKey)
 
 	response, err := client.Do(req)
 

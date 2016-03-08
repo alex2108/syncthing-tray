@@ -4,36 +4,54 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/AislerHQ/trayhost"
+	"github.com/thomasf/systray"
 	"github.com/toqueteos/webbrowser"
 	"log"
 	"math"
 	"os"
 	"os/signal"
-	"runtime"
 	"syscall"
 	"time"
-	"errors" 
-)
-
-const (
-	ICON_IDLE          = 1
-	ICON_NOT_CONNECTED = 2
-	ICON_DL            = 3
-	ICON_UL            = 4
-	ICON_ERROR         = 5
-	ICON_UL_DL         = 6
+	"errors"
+	"sync"
 )
 
 
+
+var mutex = &sync.Mutex{}
+var eventMutex = &sync.Mutex{}
+var trayMutex = &sync.Mutex{}
 var since_events = 0
 var startTime = "-"
+var eventChan = make(chan event,10000)
+
+type folderSummary struct {
+	NeedFiles   int    `json:"needFiles"`
+	State       string `json:"state"`
+	GlobalFiles int    `json:"globalFiles"`
+}
+
+type eventData struct {
+	Folder     string        `json:"folder"`
+	Summary    folderSummary `json:"summary"`
+	Completion float64       `json:"completion"`
+	Device     string        `json:"device"`
+	Id         string        `json:"id"`
+}
+type event struct {
+	ID   int       `json:"id"`
+	Type string    `json:"type"`
+	Time time.Time `json:"time"`
+	Data eventData `json:"data"`
+}
+
+
+
 
 // config for connection to syncthing
 type Config struct {
 	Url      string
-	username string
-	password string
+	ApiKey	 string
 	insecure bool
 }
 
@@ -64,68 +82,22 @@ var folder map[string]*Folder
 
 
 func readEvents() error {
-	type folderSummary struct {
-		NeedFiles   int    `json:"needFiles"`
-		State       string `json:"state"`
-		GlobalFiles int    `json:"globalFiles"`
-	}
-
-	type eventData struct {
-		Folder     string        `json:"folder"`
-		Summary    folderSummary `json:"summary"`
-		Completion float64       `json:"completion"`
-		Device     string        `json:"device"`
-		Id         string        `json:"id"`
-	}
-	type event struct {
-		ID   int       `json:"id"`
-		Type string    `json:"type"`
-		Time time.Time `json:"time"`
-		Data eventData `json:"data"`
-	}
-
+	
+	eventMutex.Lock()
+	defer eventMutex.Unlock()
 	res, err := query_syncthing(fmt.Sprintf("%s/rest/events?since=%d", config.Url, since_events))
 
-	if err != nil { //usually connection error -> continue
-		//log.Println(err)
+	if err != nil {
 		return err
 	} else {
 		var events []event
 		err = json.Unmarshal([]byte(res), &events)
 		if err != nil {
-			//log.Println(err)
 			return err
 		}
 
 		for _, event := range events {
-			// handle different events
-			if event.Type == "FolderSummary" {
-				folder[event.Data.Folder].needFiles = event.Data.Summary.NeedFiles
-				folder[event.Data.Folder].state = event.Data.Summary.State
-				folder[event.Data.Folder].completion = 100 - 100*float64(event.Data.Summary.NeedFiles)/math.Max(float64(event.Data.Summary.GlobalFiles), 1)
-
-				updateStatus()
-
-			} else if event.Type == "FolderCompletion" {
-				device[event.Data.Device].folderCompletion[event.Data.Folder] = event.Data.Completion
-
-				updateStatus()
-
-			} else if event.Type == "DeviceConnected" {
-				log.Println(event.Data.Id, "connected")
-				device[event.Data.Id].connected = true
-				updateStatus()
-
-			} else if event.Type == "DeviceDisconnected" {
-				log.Println(event.Data.Id, "disconnected")
-				device[event.Data.Id].connected = false
-				updateStatus()
-			} else if event.Type == "ConfigSaved" {
-				log.Println("got new config -> reinitialize")
-				since_events = event.ID
-				return errors.New("got new config") 
-
-			}
+			eventChan <- event
 			since_events = event.ID
 		}
 
@@ -134,16 +106,52 @@ func readEvents() error {
 	return nil
 }
 
+
+func eventProcessor() error {
+	for event := range eventChan {
+		mutex.Lock() // mutex with initialitze which may still be running
+		// handle different events
+		if event.Type == "FolderSummary" {
+			folder[event.Data.Folder].needFiles = event.Data.Summary.NeedFiles
+			folder[event.Data.Folder].state = event.Data.Summary.State
+			folder[event.Data.Folder].completion = 100 - 100*float64(event.Data.Summary.NeedFiles)/math.Max(float64(event.Data.Summary.GlobalFiles), 1)
+
+			updateStatus()
+
+		} else if event.Type == "FolderCompletion" {
+			device[event.Data.Device].folderCompletion[event.Data.Folder] = event.Data.Completion
+
+			updateStatus()
+
+		} else if event.Type == "DeviceConnected" {
+			log.Println(event.Data.Id, "connected")
+			device[event.Data.Id].connected = true
+			updateStatus()
+
+		} else if event.Type == "DeviceDisconnected" {
+			log.Println(event.Data.Id, "disconnected")
+			device[event.Data.Id].connected = false
+			updateStatus()
+		} else if event.Type == "ConfigSaved" {
+			log.Println("got new config -> reinitialize")
+			since_events = event.ID
+			mutex.Unlock()
+			return errors.New("got new config") 
+
+		}
+		mutex.Unlock()
+	}
+	return nil
+}
+
+
+
 func main_loop() {
 	for {
 		err := readEvents()
 		if err != nil {
-			defer initialize()
-			log.Println("error while reading events:",err)
-			return
+			initialize()
 		}
-		
-		
 	}
 
 }
@@ -181,110 +189,54 @@ func updateStatus() {
 
 	log.Printf("connected %v", numConnected)
 
-	trayhost.UpdateCh <- trayhost.MenuItemUpdate{2, trayhost.MenuItem{
-		fmt.Sprintf("Connected to %d Devices", numConnected),
-		true,
-		nil,
-	},
-	}
+	trayMutex.Lock()
+	trayEntries.connectedDevices.SetTitle(fmt.Sprintf("Connected to %d Devices", numConnected))
+	trayMutex.Unlock()
 
 	if numConnected == 0 {
 		//not connected
 		log.Println("not connected")
-		err := trayhost.SetIcon(ICON_NOT_CONNECTED)
-		log.Println(err)
+		systray.SetIcon(icon_not_connected)
+
 	} else if downloading && uploading {
 		//ul+dl
 		log.Println("ul+dl")
-		err := trayhost.SetIcon(ICON_UL_DL)
-		log.Println(err)
+		systray.SetIcon(icon_ul_dl)
 	} else if downloading && !uploading {
 		//dl
 		log.Println("dl")
-		err := trayhost.SetIcon(ICON_DL)
-		log.Println(err)
+		systray.SetIcon(icon_dl)
 	} else if !downloading && uploading {
 		//ul
 		log.Println("ul")
-		err := trayhost.SetIcon(ICON_UL)
-		log.Println(err)
+		systray.SetIcon(icon_ul)
 	} else if !downloading && !uploading {
 		//idle
 		log.Println("idle")
-		err := trayhost.SetIcon(ICON_IDLE)
-		log.Println(err)
+		systray.SetIcon(icon_idle)
 	}
 
 }
 
 func main() {
+	
 	url := flag.String("target", "http://localhost:8384", "Target Syncthing instance")
-	user := flag.String("u", "", "User")
-	pw := flag.String("p", "", "Password")
-	iconDir := flag.String("icondir", os.TempDir(), "Directory to store temporary icons")
+	api := flag.String("api", "", "Syncthing Api Key (used for password protected syncthing instance)")
 	insecure := flag.Bool("i", false, "skip verification of SSL certificate")
 	flag.Parse()
 
 	config.Url = *url
-	config.username = *user
-	config.password = *pw
+	config.ApiKey = *api
 	config.insecure = *insecure
 
-	// EnterLoop must be called on the OS's main thread
-	runtime.LockOSThread()
-
-	menuItems := trayhost.MenuItems{
-		0: trayhost.MenuItem{
-			"Syncthing-Tray",
-			true,
-			nil,
-		},
-		1: trayhost.MenuItem{
-			"",
-			true,
-			nil,
-		},
-		2: trayhost.MenuItem{
-			"waiting for response of syncthing",
-			true,
-			nil,
-		},
-		3: trayhost.MenuItem{
-			"Open Syncthing GUI",
-			false,
-			func() {
-				log.Println("Opening Browser")
-				webbrowser.Open(config.Url)
-			},
-		},
-		4: trayhost.MenuItem{
-			fmt.Sprintf(""),
-			true,
-			nil,
-		},
-		5: trayhost.MenuItem{
-			"Exit",
-			false,
-			trayhost.Exit,
-		}}
-
-	trayhost.Initialize("Syncthing-Tray", icon_error, menuItems, *iconDir)
-	trayhost.SetClickHandler(onClick)
-	//trayhost.SetIconImage(ICON_ALTERNATIVE, icon_not_connected)
-	//trayhost.SetIconImage(ICON_ATTENTION, icon_error)
-	trayhost.SetIconImage(ICON_IDLE, icon_idle)
-	trayhost.SetIconImage(ICON_NOT_CONNECTED, icon_not_connected)
-	trayhost.SetIconImage(ICON_DL, icon_dl)
-	trayhost.SetIconImage(ICON_UL, icon_ul)
-	trayhost.SetIconImage(ICON_ERROR, icon_error)
-	trayhost.SetIconImage(ICON_UL_DL, icon_ul_dl)
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
 	signal.Notify(c, syscall.SIGTERM)
 	go func() {
 		<-c
-		trayhost.Exit()
+		systray.Quit()
+		os.Exit(0)
 	}()
 
 	log.SetOutput(os.Stdout)
@@ -292,16 +244,54 @@ func main() {
 
 	log.Println("Starting Syncthing-Tray")
 	log.Println("Connecting to syncthing at", config.Url)
-
+	trayMutex.Lock()
 	go func() {
 		initialize()
+	    main_loop()
+		
 	}()
 
-	// Enter the host system's event loop
-	trayhost.EnterLoop()
 
-	// This is only reached once the user chooses the Exit menu item
-	log.Println("Exiting syncthing-tray")
+	systray.Run(setupTray)
+
+}
+
+type TrayEntries struct {
+	stVersion 			*systray.MenuItem
+	connectedDevices 	*systray.MenuItem
+	openBrowser			*systray.MenuItem
+	quit 				*systray.MenuItem
+}
+var trayEntries TrayEntries
+
+func setupTray() {
+	systray.SetIcon(icon_error)
+	systray.SetTitle("")
+	systray.SetTooltip("Syncthing-Tray")
+	
+	trayEntries.stVersion = systray.AddMenuItem("not connected", "Syncthing")
+	trayEntries.stVersion.Disable()
+	
+	trayEntries.connectedDevices = systray.AddMenuItem("not connected", "Connected devices")
+	trayEntries.connectedDevices.Disable()
+	trayEntries.openBrowser = systray.AddMenuItem("Open Syncthing GUI", "opens syncthing GUI in default browser")
+	
+	
+	trayEntries.quit = systray.AddMenuItem("Quit", "Quit Syncthing-Tray")
+	go func() {
+		for {
+			select {
+			case <-trayEntries.quit.ClickedCh:
+				systray.Quit()
+				fmt.Println("Quit now...")
+				os.Exit(0)
+			case <- trayEntries.openBrowser.ClickedCh:
+				webbrowser.Open(config.Url)
+			}
+		}
+		
+	}()
+	trayMutex.Unlock()
 }
 
 func onClick() { // not usable on ubuntu, left click also displays the menu
