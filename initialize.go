@@ -144,8 +144,11 @@ func getStartTime() (string, error){
 // helper to get a lock before starting the new thread that can run in background after a lock is aquired
 func initialize() {
 	// block all before config is read
-	eventMutex.Lock() 
+	
+	log.Println("wating for lock")
 	mutex.Lock()
+	log.Println("wating for event lock")
+	eventMutex.Lock() 
 	go initializeLocked()
 }
 

@@ -82,9 +82,6 @@ var folder map[string]*Folder
 
 
 func readEvents() error {
-	
-	eventMutex.Lock()
-	defer eventMutex.Unlock()
 	res, err := query_syncthing(fmt.Sprintf("%s/rest/events?since=%d", config.Url, since_events))
 
 	if err != nil {
@@ -102,7 +99,6 @@ func readEvents() error {
 		}
 
 	}
-
 	return nil
 }
 
@@ -136,7 +132,9 @@ func eventProcessor() error {
 			log.Println("got new config -> reinitialize")
 			since_events = event.ID
 			mutex.Unlock()
-			return errors.New("got new config") 
+			defer initialize()
+			return errors.New("got new config")  
+			
 
 		}
 		mutex.Unlock()
@@ -148,7 +146,10 @@ func eventProcessor() error {
 
 func main_loop() {
 	for {
+		eventMutex.Lock()
 		err := readEvents()
+		eventMutex.Unlock()
+		time.Sleep(time.Millisecond); // otherwise initialize does not have a chance to get the lock since it is aquired here instantly again
 		if err != nil {
 			initialize()
 		}
