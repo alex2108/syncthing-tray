@@ -20,10 +20,14 @@ import (
 
 var mutex = &sync.Mutex{}
 var eventMutex = &sync.Mutex{}
+var dataMutex = &sync.Mutex{}
 var trayMutex = &sync.Mutex{}
 var since_events = 0
 var startTime = "-"
 var eventChan = make(chan event,10000)
+
+var inBytesRate float64
+var outBytesRate float64
 
 type folderSummary struct {
 	NeedFiles   int    `json:"needFiles"`
@@ -53,6 +57,7 @@ type Config struct {
 	Url      string
 	ApiKey	 string
 	insecure bool
+	useRates bool
 }
 
 
@@ -187,13 +192,35 @@ func updateStatus() {
 		}
 
 	}
+	
+	if config.useRates {
+		dataMutex.Lock()
+		if inBytesRate > 500 {
+			downloading = true
+		} else {
+			downloading = false
+		}
+		if outBytesRate > 500 {
+			uploading = true
+		} else {
+			uploading = false
+		}
+		dataMutex.Unlock()
+	}
+	
 
 	log.Printf("connected %v", numConnected)
 
 	trayMutex.Lock()
 	trayEntries.connectedDevices.SetTitle(fmt.Sprintf("Connected to %d Devices", numConnected))
+	setIcon(numConnected,downloading,uploading)
 	trayMutex.Unlock()
 
+	
+
+}
+
+func setIcon(numConnected int,downloading,uploading bool) {
 	if numConnected == 0 {
 		//not connected
 		log.Println("not connected")
@@ -224,12 +251,13 @@ func main() {
 	url := flag.String("target", "http://localhost:8384", "Target Syncthing instance")
 	api := flag.String("api", "", "Syncthing Api Key (used for password protected syncthing instance)")
 	insecure := flag.Bool("i", false, "skip verification of SSL certificate")
+	useRates := flag.Bool("R", false, "use transfer rates to determine upload/download state")
 	flag.Parse()
 
 	config.Url = *url
 	config.ApiKey = *api
 	config.insecure = *insecure
-
+	config.useRates = *useRates
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
@@ -246,6 +274,7 @@ func main() {
 	log.Println("Starting Syncthing-Tray")
 	log.Println("Connecting to syncthing at", config.Url)
 	trayMutex.Lock()
+	go rate_reader()
 	go func() {
 		initialize()
 	    main_loop()
@@ -260,6 +289,7 @@ func main() {
 type TrayEntries struct {
 	stVersion 			*systray.MenuItem
 	connectedDevices 	*systray.MenuItem
+	rateDisplay			*systray.MenuItem
 	openBrowser			*systray.MenuItem
 	quit 				*systray.MenuItem
 }
@@ -275,6 +305,8 @@ func setupTray() {
 	
 	trayEntries.connectedDevices = systray.AddMenuItem("not connected", "Connected devices")
 	trayEntries.connectedDevices.Disable()
+	trayEntries.rateDisplay = systray.AddMenuItem("↓: 0 B/s ↑: 0 B/s", "Upload and download rate")
+	trayEntries.rateDisplay.Disable()
 	trayEntries.openBrowser = systray.AddMenuItem("Open Syncthing GUI", "opens syncthing GUI in default browser")
 	
 	
