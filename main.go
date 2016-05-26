@@ -12,7 +12,6 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
-	"errors"
 	"sync"
 )
 
@@ -108,7 +107,7 @@ func readEvents() error {
 }
 
 
-func eventProcessor() error {
+func eventProcessor() {
 	for event := range eventChan {
 		mutex.Lock() // mutex with initialitze which may still be running
 		// handle different events
@@ -137,14 +136,10 @@ func eventProcessor() error {
 			log.Println("got new config -> reinitialize")
 			since_events = event.ID
 			mutex.Unlock()
-			defer initialize()
-			return errors.New("got new config")  
-			
-
+			initialize()
 		}
 		mutex.Unlock()
 	}
-	return nil
 }
 
 
@@ -275,9 +270,10 @@ func main() {
 	log.Println("Connecting to syncthing at", config.Url)
 	trayMutex.Lock()
 	go rate_reader()
+	go eventProcessor()
 	go func() {
 		initialize()
-	    main_loop()
+		main_loop()
 		
 	}()
 

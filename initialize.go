@@ -165,8 +165,10 @@ func initializeLocked() {
 		}
 		err = get_config()
 	}
-	eventChan = make(chan event,10000)
-	go eventProcessor() //start processing events again
+	// let old events be processed to start with a clean event channel
+	for len(eventChan)>0 {
+		time.Sleep(time.Millisecond)
+	}
 	eventMutex.Unlock()
 	mutex.Unlock()
 	// get current state
