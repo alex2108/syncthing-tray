@@ -242,7 +242,20 @@ func setIcon(numConnected int,downloading,uploading bool) {
 }
 
 func main() {
-	
+	// must be done at the beginning
+	systray.Run(setupTray)
+}
+
+type TrayEntries struct {
+	stVersion 			*systray.MenuItem
+	connectedDevices 	*systray.MenuItem
+	rateDisplay			*systray.MenuItem
+	openBrowser			*systray.MenuItem
+	quit 				*systray.MenuItem
+}
+var trayEntries TrayEntries
+
+func setupTray() {
 	url := flag.String("target", "http://localhost:8384", "Target Syncthing instance")
 	api := flag.String("api", "", "Syncthing Api Key (used for password protected syncthing instance)")
 	insecure := flag.Bool("i", false, "skip verification of SSL certificate")
@@ -276,22 +289,6 @@ func main() {
 		main_loop()
 		
 	}()
-
-
-	systray.Run(setupTray)
-
-}
-
-type TrayEntries struct {
-	stVersion 			*systray.MenuItem
-	connectedDevices 	*systray.MenuItem
-	rateDisplay			*systray.MenuItem
-	openBrowser			*systray.MenuItem
-	quit 				*systray.MenuItem
-}
-var trayEntries TrayEntries
-
-func setupTray() {
 	systray.SetIcon(icon_error)
 	systray.SetTitle("")
 	systray.SetTooltip("Syncthing-Tray")
