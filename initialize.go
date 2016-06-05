@@ -13,12 +13,12 @@ func get_folder_state() error {
 	for key, rep := range folder {
 		mutex.Lock()
 		if folder[key].completion >= 0 {
-			log.Println("already got info for folder",key,"from events, skipping")
+			log.Println("already got info for folder", key, "from events, skipping")
 			mutex.Unlock()
 			continue
 		}
 		r_json, err := query_syncthing(config.Url + "/rest/db/status?folder=" + rep.id)
-		log.Println("getting state for folder",rep.id)
+		log.Println("getting state for folder", rep.id)
 		if err == nil {
 			type Folderstate struct {
 				NeedFiles   int
@@ -45,7 +45,7 @@ func get_folder_state() error {
 		}
 		mutex.Unlock()
 		// let events be processed, might save some expensive api calls
-		for len(eventChan)>0 {
+		for len(eventChan) > 0 {
 			time.Sleep(time.Millisecond)
 		}
 	}
@@ -72,11 +72,11 @@ func get_connections() error {
 		connectionState := m.(map[string]interface{})
 		device[deviceId].connected = connectionState["connected"].(bool)
 	}
-	
+
 	return err
 }
 func update_ul() error {
-	
+
 	type Completion struct {
 		Completion float64
 	}
@@ -84,14 +84,14 @@ func update_ul() error {
 		for _, n := range r_info.sharedWith {
 			mutex.Lock()
 			if device[n].folderCompletion[r] >= 0 {
-				log.Println("already got info for device",n,"folder",r,"from events, skipping")
+				log.Println("already got info for device", n, "folder", r, "from events, skipping")
 				mutex.Unlock()
 				continue
 			}
-		
+
 			if device[n].connected { // only query connected devices
 				out, err := query_syncthing(config.Url + "/rest/db/completion?device=" + n + "&folder=" + r)
-				log.Println("updating upload status for device",n,"folder",r)
+				log.Println("updating upload status for device", n, "folder", r)
 				if err != nil {
 					log.Println(err)
 					mutex.Unlock()
@@ -108,7 +108,7 @@ func update_ul() error {
 			}
 			mutex.Unlock()
 			// let events be processed, might save some expensive api calls
-			for len(eventChan)>0 {
+			for len(eventChan) > 0 {
 				time.Sleep(time.Millisecond)
 			}
 		}
@@ -116,15 +116,13 @@ func update_ul() error {
 	return nil
 }
 
-
-func getStartTime() (string, error){
-
+func getStartTime() (string, error) {
 
 	type StStatus struct {
 		StartTime string
 	}
 	out, err := query_syncthing(config.Url + "/rest/system/status")
-	
+
 	if err != nil {
 		log.Println(err)
 		return "", err
@@ -133,40 +131,38 @@ func getStartTime() (string, error){
 	err = json.Unmarshal([]byte(out), &m)
 	if err != nil {
 		log.Println(err)
-		return "",err
+		return "", err
 	}
 
 	return m.StartTime, nil
-
 
 }
 
 // helper to get a lock before starting the new thread that can run in background after a lock is aquired
 func initialize() {
 	// block all before config is read
-	
+
 	log.Println("wating for lock")
 	mutex.Lock()
 	log.Println("wating for event lock")
-	eventMutex.Lock() 
+	eventMutex.Lock()
 	go initializeLocked()
 }
-
 
 func initializeLocked() {
 
 	currentStartTime, err := getStartTime()
 	if err == nil {
-		
+
 		if startTime != currentStartTime {
-			log.Println("syncthing restarted at",currentStartTime)
+			log.Println("syncthing restarted at", currentStartTime)
 			startTime = currentStartTime
-			since_events = 0 
+			since_events = 0
 		}
 		err = get_config()
 	}
 	// let old events be processed to start with a clean event channel
-	for len(eventChan)>0 {
+	for len(eventChan) > 0 {
 		time.Sleep(time.Millisecond)
 	}
 	eventMutex.Unlock()
@@ -181,13 +177,12 @@ func initializeLocked() {
 	if err == nil {
 		err = update_ul()
 	}
-	
+
 	if err != nil {
-		eventMutex.Lock() 
+		eventMutex.Lock()
 		mutex.Lock()
 		log.Println(err)
 		log.Println("error getting syncthing config -> retry in 5s")
-
 
 		trayMutex.Lock()
 		trayEntries.stVersion.SetTitle(fmt.Sprintf("Syncthing: no connection to " + config.Url))
@@ -199,8 +194,6 @@ func initializeLocked() {
 		return
 	}
 	updateStatus()
-
-	
 
 }
 func get_config() error {
@@ -270,7 +263,7 @@ func get_config() error {
 			trayMutex.Lock()
 			trayEntries.stVersion.SetTitle(fmt.Sprintf("Syncthing: %s", m.Version))
 			trayMutex.Unlock()
-			
+
 		}
 	}
 	return err

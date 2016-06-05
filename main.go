@@ -10,12 +10,10 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
-	"sync"
 )
-
-
 
 var mutex = &sync.Mutex{}
 var eventMutex = &sync.Mutex{}
@@ -23,7 +21,7 @@ var dataMutex = &sync.Mutex{}
 var trayMutex = &sync.Mutex{}
 var since_events = 0
 var startTime = "-"
-var eventChan = make(chan event,10000)
+var eventChan = make(chan event, 10000)
 
 var inBytesRate float64
 var outBytesRate float64
@@ -48,18 +46,13 @@ type event struct {
 	Data eventData `json:"data"`
 }
 
-
-
-
 // config for connection to syncthing
 type Config struct {
 	Url      string
-	ApiKey	 string
+	ApiKey   string
 	insecure bool
 	useRates bool
 }
-
-
 
 var config Config
 
@@ -74,16 +67,14 @@ var device map[string]*Device
 
 // configured folders
 type Folder struct {
-	id               string
-	completion       float64
-	state            string
-	needFiles        int
-	sharedWith       []string
+	id         string
+	completion float64
+	state      string
+	needFiles  int
+	sharedWith []string
 }
 
 var folder map[string]*Folder
-
-
 
 func readEvents() error {
 	res, err := query_syncthing(fmt.Sprintf("%s/rest/events?since=%d", config.Url, since_events))
@@ -105,7 +96,6 @@ func readEvents() error {
 	}
 	return nil
 }
-
 
 func eventProcessor() {
 	for event := range eventChan {
@@ -142,14 +132,12 @@ func eventProcessor() {
 	}
 }
 
-
-
 func main_loop() {
 	for {
 		eventMutex.Lock()
 		err := readEvents()
 		eventMutex.Unlock()
-		time.Sleep(time.Millisecond); // otherwise initialize does not have a chance to get the lock since it is aquired here instantly again
+		time.Sleep(time.Millisecond) // otherwise initialize does not have a chance to get the lock since it is aquired here instantly again
 		if err != nil {
 			initialize()
 		}
@@ -187,7 +175,7 @@ func updateStatus() {
 		}
 
 	}
-	
+
 	if config.useRates {
 		dataMutex.Lock()
 		if inBytesRate > 500 {
@@ -202,20 +190,17 @@ func updateStatus() {
 		}
 		dataMutex.Unlock()
 	}
-	
 
 	log.Printf("connected %v", numConnected)
 
 	trayMutex.Lock()
 	trayEntries.connectedDevices.SetTitle(fmt.Sprintf("Connected to %d Devices", numConnected))
-	setIcon(numConnected,downloading,uploading)
+	setIcon(numConnected, downloading, uploading)
 	trayMutex.Unlock()
-
-	
 
 }
 
-func setIcon(numConnected int,downloading,uploading bool) {
+func setIcon(numConnected int, downloading, uploading bool) {
 	if numConnected == 0 {
 		//not connected
 		log.Println("not connected")
@@ -247,12 +232,13 @@ func main() {
 }
 
 type TrayEntries struct {
-	stVersion 			*systray.MenuItem
-	connectedDevices 	*systray.MenuItem
-	rateDisplay			*systray.MenuItem
-	openBrowser			*systray.MenuItem
-	quit 				*systray.MenuItem
+	stVersion        *systray.MenuItem
+	connectedDevices *systray.MenuItem
+	rateDisplay      *systray.MenuItem
+	openBrowser      *systray.MenuItem
+	quit             *systray.MenuItem
 }
+
 var trayEntries TrayEntries
 
 func setupTray() {
@@ -287,22 +273,21 @@ func setupTray() {
 	go func() {
 		initialize()
 		main_loop()
-		
+
 	}()
 	systray.SetIcon(icon_error)
 	systray.SetTitle("")
 	systray.SetTooltip("Syncthing-Tray")
-	
+
 	trayEntries.stVersion = systray.AddMenuItem("not connected", "Syncthing")
 	trayEntries.stVersion.Disable()
-	
+
 	trayEntries.connectedDevices = systray.AddMenuItem("not connected", "Connected devices")
 	trayEntries.connectedDevices.Disable()
 	trayEntries.rateDisplay = systray.AddMenuItem("↓: 0 B/s ↑: 0 B/s", "Upload and download rate")
 	trayEntries.rateDisplay.Disable()
 	trayEntries.openBrowser = systray.AddMenuItem("Open Syncthing GUI", "opens syncthing GUI in default browser")
-	
-	
+
 	trayEntries.quit = systray.AddMenuItem("Quit", "Quit Syncthing-Tray")
 	go func() {
 		for {
@@ -311,11 +296,11 @@ func setupTray() {
 				systray.Quit()
 				fmt.Println("Quit now...")
 				os.Exit(0)
-			case <- trayEntries.openBrowser.ClickedCh:
+			case <-trayEntries.openBrowser.ClickedCh:
 				webbrowser.Open(config.Url)
 			}
 		}
-		
+
 	}()
 	trayMutex.Unlock()
 }
