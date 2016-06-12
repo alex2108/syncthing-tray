@@ -7,7 +7,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/thomasf/systray"
+	"github.com/alex2108/systray"
 )
 
 func get_folder_state() error {

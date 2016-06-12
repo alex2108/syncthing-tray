@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/thomasf/systray"
+	"github.com/alex2108/systray"
 	"github.com/toqueteos/webbrowser"
 )
 
