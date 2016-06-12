@@ -3,10 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/thomasf/systray"
 	"log"
 	"math"
 	"time"
+
+	"github.com/thomasf/systray"
 )
 
 func get_folder_state() error {
@@ -161,12 +162,19 @@ func initializeLocked() {
 		}
 		err = get_config()
 	}
-	// let old events be processed to start with a clean event channel
+
+	// clean out old events
 	for len(eventChan) > 0 {
-		time.Sleep(time.Millisecond)
+		select {
+		case <-eventChan:
+			continue
+		default:
+			continue
+		}
 	}
-	eventMutex.Unlock()
 	mutex.Unlock()
+	eventMutex.Unlock()
+
 	// get current state
 	if err == nil {
 		err = get_folder_state()

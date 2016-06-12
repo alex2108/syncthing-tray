@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/thomasf/systray"
-	"github.com/toqueteos/webbrowser"
 	"log"
 	"math"
 	"os"
@@ -13,6 +11,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/thomasf/systray"
+	"github.com/toqueteos/webbrowser"
 )
 
 var mutex = &sync.Mutex{}
@@ -127,6 +128,7 @@ func eventProcessor() {
 			since_events = event.ID
 			mutex.Unlock()
 			initialize()
+			continue
 		}
 		mutex.Unlock()
 	}
