@@ -11,6 +11,8 @@ do
     $GOPATH/bin/2goarray $ICON main < img/$ICON.png |  grep -v package >> "$OUTPUT"
 done
 
+if [ "$(uname)" == "Darwin" ]; then
+
 OUTPUT=icon_darwin.go
 
 echo "//+build darwin" > "$OUTPUT"
@@ -24,6 +26,8 @@ do
      tiffutil -cathidpicheck img/darwin/$ICON.png img/darwin/$ICON@2x.png -out img/darwin/$ICON.tiff
      $GOPATH/bin/2goarray $ICON main < img/darwin/$ICON.tiff |  grep -v package >> "$OUTPUT"
 done
+
+fi
 
 OUTPUT=icon_windows.go
 
