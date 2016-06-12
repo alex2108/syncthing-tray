@@ -1,7 +1,7 @@
 #/bin/sh
 OUTPUT=icon_unix.go
 
-echo "//+build linux darwin" > "$OUTPUT"
+echo "//+build linux" > "$OUTPUT"
 echo "" >> "$OUTPUT"
 echo "package main" >> "$OUTPUT"
 echo "" >> "$OUTPUT"
@@ -11,6 +11,23 @@ do
     $GOPATH/bin/2goarray $ICON main < img/$ICON.png |  grep -v package >> "$OUTPUT"
 done
 
+if [ "$(uname)" == "Darwin" ]; then
+
+OUTPUT=icon_darwin.go
+
+echo "//+build darwin" > "$OUTPUT"
+echo "" >> "$OUTPUT"
+echo "package main" >> "$OUTPUT"
+echo "" >> "$OUTPUT"
+for ICON in "icon_dl" "icon_error" "icon_idle" "icon_not_connected" "icon_ul" "icon_ul_dl"
+do
+     convert -background none img/$ICON.svg -resize 18x18 -sharpen 1 img/darwin/$ICON.png
+     convert -background none img/$ICON.svg -resize 36x36 -sharpen 1 img/darwin/$ICON@2x.png
+     tiffutil -cathidpicheck img/darwin/$ICON.png img/darwin/$ICON@2x.png -out img/darwin/$ICON.tiff
+     $GOPATH/bin/2goarray $ICON main < img/darwin/$ICON.tiff |  grep -v package >> "$OUTPUT"
+done
+
+fi
 
 OUTPUT=icon_windows.go
 
