@@ -18,7 +18,7 @@ Building
 
 The following packages on Ubuntu 14.04/16.04 are needed: `libgtk-3-dev libappindicator3-dev`. On other distributions other packages may be needed.
 
-Version iformation is provided by adding `-ldflags "-X main.VersionStr=$versionStr -X main.BuildUnixTime=$versionDate"` when compiling.
+Version iformation is provided by adding `-ldflags "-X main.VersionStr=$versionStr -X main.BuildUnixTime=$versionDate"` when compiling. `$versionStr` is the version that should be printed, e.g. `v0.7`. `$versionDate` is a unix timestamp in seconds.
 Example:
 ```
 go build -i -v -o ./linux64/syncthing-tray -ldflags "-X main.VersionStr=$versionStr -X main.BuildUnixTime=$versionDate" github.com/alex2108/syncthing-tray
