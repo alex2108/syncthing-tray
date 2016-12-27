@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -15,6 +16,8 @@ import (
 	"github.com/alex2108/systray"
 	"github.com/toqueteos/webbrowser"
 )
+var VersionStr = "unknown"
+var BuildUnixTime = "0"
 
 var mutex = &sync.Mutex{}
 var eventMutex = &sync.Mutex{}
@@ -31,6 +34,7 @@ type folderSummary struct {
 	NeedFiles   int    `json:"needFiles"`
 	State       string `json:"state"`
 	GlobalFiles int    `json:"globalFiles"`
+	NeedDeletes int    `json:"needDeletes"`
 }
 
 type eventData struct {
@@ -105,8 +109,13 @@ func eventProcessor() {
 		if event.Type == "FolderSummary" {
 			folder[event.Data.Folder].needFiles = event.Data.Summary.NeedFiles
 			folder[event.Data.Folder].state = event.Data.Summary.State
-			folder[event.Data.Folder].completion = 100 - 100*float64(event.Data.Summary.NeedFiles)/math.Max(float64(event.Data.Summary.GlobalFiles), 1)
-
+			folder[event.Data.Folder].state = event.Data.Summary.State
+			log.Println(event.Data.Summary.NeedDeletes)
+			if event.Data.Summary.NeedDeletes == 0 {
+			    folder[event.Data.Folder].completion = 100 - 100*float64(event.Data.Summary.NeedFiles)/math.Max(float64(event.Data.Summary.GlobalFiles), 1)
+            } else {
+                folder[event.Data.Folder].completion = 95
+            }
 			updateStatus()
 
 		} else if event.Type == "FolderCompletion" {
@@ -169,9 +178,10 @@ func updateStatus() {
 		if dev_info.connected {
 			numConnected++
 
-			for _, completion := range dev_info.folderCompletion {
+			for folderName, completion := range dev_info.folderCompletion {
 				if completion < 100 {
 					uploading = true
+					log.Println("DEBUG:",dev_info.name,folderName,completion)
 				}
 			}
 		}
@@ -266,8 +276,11 @@ func setupTray() {
 
 	log.SetOutput(os.Stdout)
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-
-	log.Println("Starting Syncthing-Tray")
+    
+    buildInt, _ := strconv.Atoi(BuildUnixTime)
+    buildT := time.Unix(int64(buildInt), 0)
+    date := buildT.UTC().Format("2006-01-02 15:04:05 MST")
+	log.Println("Starting Syncthing-Tray",VersionStr,"-",date)
 	log.Println("Connecting to syncthing at", config.Url)
 	trayMutex.Lock()
 	go rate_reader()
